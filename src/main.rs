@@ -1,5 +1,5 @@
 use anyhow::{self, Result};
-use rand::{Rng, SeedableRng, TryRngCore, rngs::OsRng, rngs::StdRng};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::collections::{HashMap, HashSet};
@@ -84,6 +84,7 @@ struct Config {
     true_alphabet: i32,
 
     /// normal (collision) IDs are drawn from 1..=core_alphabet (<= true_alphabet)
+    #[allow(dead_code)]
     core_alphabet: i32,
 
     seed: u64,
@@ -103,6 +104,19 @@ fn random_seed() -> u64 {
     rand::random::<u64>()
 }
 
+const MAX_EDGE_ID: i32 = 295; // 値の絶対値上限
+const VALS: usize = (2 * 295 + 1) as usize; // -295..295 の 591 通り
+const DIRS_N: usize = 6; // 方向 6
+
+#[inline]
+fn idx_key(dir: usize, value: i32) -> usize {
+    debug_assert!(dir < DIRS_N);
+    debug_assert!(value >= -MAX_EDGE_ID && value <= MAX_EDGE_ID);
+    dir * VALS + (value + MAX_EDGE_ID) as usize
+}
+
+type Postings = Vec<Vec<u16>>; // len = DIRS_N * VALS
+
 fn parse_opt_u64(flag: &str) -> Option<u64> {
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -115,6 +129,23 @@ fn parse_opt_u64(flag: &str) -> Option<u64> {
         }
     }
     None
+}
+
+fn build_postings(edges_rot: &Vec<[[i32; 6]; 6]>) -> Postings {
+    let n_p = edges_rot.len();
+    let mut idx: Postings = vec![Vec::new(); DIRS_N * VALS];
+
+    for p in 0..n_p {
+        for r in 0..6 {
+            let pl = (p * 6 + r) as u16;
+            for d in 0..6 {
+                let v = edges_rot[p][r][d];
+                // v は -295..295 の範囲のはず（幾何辞書に従う前提）
+                idx[idx_key(d, v)].push(pl);
+            }
+        }
+    }
+    idx
 }
 
 fn parse_opt_usize(flag: &str) -> Option<usize> {
@@ -250,6 +281,7 @@ fn main() -> Result<()> {
                 seed,
                 rep_f.nodes
             );
+
             continue;
         }
 
@@ -284,6 +316,9 @@ fn main() -> Result<()> {
             "SELECTED seed={} score={} (u_nodes={}, f_nodes={})",
             seed, score, u_nodes, f_nodes
         );
+
+        let out_dir = format!("out_svg/selected_seed_{}", seed);
+        dump_svgs(&out_dir, &p.pieces, None)?;
 
         let solution = build_solution(p.side_len, &p);
 
@@ -533,15 +568,15 @@ fn generate_false_pieces(
                         {
                             let v = true_edge_ids_abs[rng.random_range(0..true_edge_ids_abs.len())]
                                 .abs();
-                            edge_arrays[i][dir_idx] = if rng.gen_bool(0.5) { v } else { -v };
+                            edge_arrays[i][dir_idx] = if rng.random_bool(0.5) { v } else { -v };
                         } else {
                             // 適合なし（真に噛まないレンジ）
                             if unmatched_lo <= unmatched_hi {
                                 let v = rng.random_range(unmatched_lo..=unmatched_hi);
-                                edge_arrays[i][dir_idx] = if rng.gen_bool(0.5) { v } else { -v };
+                                edge_arrays[i][dir_idx] = if rng.random_bool(0.5) { v } else { -v };
                             } else {
                                 let v = rng.random_range(1..=true_alphabet);
-                                edge_arrays[i][dir_idx] = if rng.gen_bool(0.5) { v } else { -v };
+                                edge_arrays[i][dir_idx] = if rng.random_bool(0.5) { v } else { -v };
                             }
                         }
                     }
@@ -648,6 +683,7 @@ fn generate_puzzle(
     min_gap: f64,
 ) -> Result<Puzzle> {
     let mut rng = StdRng::seed_from_u64(cfg.seed);
+    let true_count = hex_board_coords(cfg.side_len).len();
 
     let (mut true_pieces, true_edge_ids_abs, _true_stats) = generate_true_pieces(
         &mut rng,
@@ -684,8 +720,8 @@ fn generate_puzzle(
     Ok(Puzzle {
         side_len: cfg.side_len,
         edge_alphabet: cfg.total_alphabet,
-        true_piece_count: hex_board_coords(cfg.side_len).len(),
-        false_piece_count: pieces.len() - hex_board_coords(cfg.side_len).len(),
+        true_piece_count: true_count,
+        false_piece_count: pieces.len() - true_count,
         pieces,
         stats,
     })
@@ -797,6 +833,18 @@ fn reflect_axial(c: Axial) -> Axial {
 // Derived by applying the linear map (dq,dr)->(dq,-dq-dr) to DIRS.
 const REFLECT_DIR_MAP: [usize; 6] = [1, 0, 5, 4, 3, 2];
 
+fn lex_less_u32(a: &[u32], b: &[u32]) -> bool {
+    for (x, y) in a.iter().zip(b.iter()) {
+        if x < y {
+            return true;
+        }
+        if x > y {
+            return false;
+        }
+    }
+    false
+}
+
 fn reflect_edges(edges: &[i32; 6]) -> [i32; 6] {
     // new_dir = REFLECT_DIR_MAP[old_dir]
     // so for each old_dir, place edges[old_dir] into out[new_dir]
@@ -814,10 +862,12 @@ fn canonical_solution_fingerprint_rot_only(
     edges_rot: &Vec<[[i32; 6]; 6]>,
 ) -> Vec<u32> {
     let n = board.n_cells();
-    let mut best: Option<Vec<u32>> = None;
+    let mut best: Vec<u32> = vec![0; n];
+    let mut has_best = false;
+    let mut tmp = vec![0u32; n];
 
     for k in 0..6 {
-        let mut tmp = vec![0u32; n];
+        tmp.fill(0);
         for (i, &cell) in board.coords.iter().enumerate() {
             let Some((p, r)) = assignment[i] else {
                 continue;
@@ -827,16 +877,13 @@ fn canonical_solution_fingerprint_rot_only(
             let r2 = (r + 6 - k) % 6;
             tmp[j] = fnv1a_u32_i32x6(&edges_rot[p][r2]);
         }
-        match &best {
-            None => best = Some(tmp),
-            Some(b) => {
-                if tmp < *b {
-                    best = Some(tmp);
-                }
-            }
+
+        if !has_best || lex_less_u32(&tmp, &best) {
+            best.clone_from_slice(&tmp);
+            has_best = true;
         }
     }
-    best.unwrap()
+    best
 }
 
 fn canonical_solution_fingerprint_dihedral(
@@ -845,11 +892,14 @@ fn canonical_solution_fingerprint_dihedral(
     edges_rot: &Vec<[[i32; 6]; 6]>,
 ) -> Vec<u32> {
     let n = board.n_cells();
-    let mut best: Option<Vec<u32>> = None;
+    let mut best: Vec<u32> = vec![0; n];
+    let mut has_best = false;
+    let mut tmp_r = vec![0u32; n];
+    let mut tmp_rf = vec![0u32; n];
 
     for k in 0..6 {
         // rotation
-        let mut tmp_r = vec![0u32; n];
+        tmp_r.fill(0);
         for (i, &cell) in board.coords.iter().enumerate() {
             let Some((p, r)) = assignment[i] else {
                 continue;
@@ -859,13 +909,13 @@ fn canonical_solution_fingerprint_dihedral(
             let r2 = (r + 6 - k) % 6;
             tmp_r[j] = fnv1a_u32_i32x6(&edges_rot[p][r2]);
         }
-        best = match &best {
-            None => Some(tmp_r),
-            Some(b) => Some(if tmp_r < *b { tmp_r } else { b.clone() }),
-        };
+        if !has_best || lex_less_u32(&tmp_r, &best) {
+            best.clone_from_slice(&tmp_r);
+            has_best = true;
+        }
 
         // rotation + reflection
-        let mut tmp_rf = vec![0u32; n];
+        tmp_rf.fill(0);
         for (i, &cell) in board.coords.iter().enumerate() {
             let Some((p, r)) = assignment[i] else {
                 continue;
@@ -876,13 +926,13 @@ fn canonical_solution_fingerprint_dihedral(
             let mirrored = reflect_edges(&edges_rot[p][r2]);
             tmp_rf[j] = fnv1a_u32_i32x6(&mirrored);
         }
-        best = match &best {
-            None => Some(tmp_rf),
-            Some(b) => Some(if tmp_rf < *b { tmp_rf } else { b.clone() }),
-        };
+        if !has_best || lex_less_u32(&tmp_rf, &best) {
+            best.clone_from_slice(&tmp_rf);
+            has_best = true;
+        }
     }
 
-    best.unwrap()
+    best
 }
 
 struct UniquenessSolver {
@@ -893,7 +943,7 @@ struct UniquenessSolver {
     edges_rot: Vec<[[i32; 6]; 6]>,
 
     // (dir, value) -> placements (piece_idx*6+rot)
-    idx: HashMap<(u8, i32), Vec<u16>>,
+    idx: Postings,
 
     used: Vec<bool>,
     assignment: Vec<Option<(usize, usize)>>,
@@ -905,12 +955,14 @@ struct UniquenessSolver {
 
     solutions_found: u64,
     nodes: u64,
+    cand_cache: CandidateCache,
 }
 
 impl UniquenessSolver {
     fn new(side_len: i32, pieces: &[Piece]) -> Self {
         let board = Board::new(side_len);
         let pieces = pieces.to_vec();
+        let n_cells = board.n_cells();
 
         let n_p = pieces.len();
         let mut edges_rot = vec![[[0i32; 6]; 6]; n_p];
@@ -920,17 +972,8 @@ impl UniquenessSolver {
             }
         }
 
-        // 制約インデックス
-        let mut idx: HashMap<(u8, i32), Vec<u16>> = HashMap::new();
-        for p in 0..n_p {
-            for r in 0..6 {
-                let placement = (p * 6 + r) as u16;
-                for d in 0..6 {
-                    let v = edges_rot[p][r][d];
-                    idx.entry((d as u8, v)).or_default().push(placement);
-                }
-            }
-        }
+        // HashMapをやめて配列postingsに
+        let idx = build_postings(&edges_rot);
 
         Self {
             board,
@@ -938,13 +981,24 @@ impl UniquenessSolver {
             edges_rot,
             idx,
             used: vec![false; n_p],
-            assignment: vec![None; Board::new(side_len).n_cells()],
+            assignment: vec![None; n_cells],
             first_fingerprint: None,
             first_fingerprint_d6: None,
             nonunique_only_by_reflection: false,
             nonunique: false,
             solutions_found: 0,
             nodes: 0,
+            cand_cache: CandidateCache::new(n_cells),
+        }
+    }
+
+    #[inline]
+    fn mark_dirty_around(&mut self, cell: usize) {
+        self.cand_cache.mark_dirty(cell);
+        for d in 0..6 {
+            if let Some(nb) = self.board.neighbors[cell][d] {
+                self.cand_cache.mark_dirty(nb);
+            }
         }
     }
 
@@ -972,9 +1026,27 @@ impl UniquenessSolver {
     }
 
     fn candidates_for_cell(&self, cell: usize) -> Vec<u16> {
-        let cons = self.constraints_for_cell(cell);
-        if cons.is_empty() {
-            // 制約が何も無い場合：全unused×6 が候補（ただし現実には起きにくい）
+        // req[d] = このセルの方向dに要求される値（Noneなら未拘束）
+        let mut req: [Option<i32>; 6] = [None, None, None, None, None, None];
+
+        // boundary => 0
+        for d in 0..6 {
+            if self.board.boundary[cell][d] {
+                req[d] = Some(0);
+            }
+        }
+        // neighbor-implied
+        for d in 0..6 {
+            if let Some(nb) = self.board.neighbors[cell][d] {
+                if let Some((p2, r2)) = self.assignment[nb] {
+                    let v_nb = self.edges_rot[p2][r2][opposite_dir(d)];
+                    req[d] = Some(-v_nb);
+                }
+            }
+        }
+
+        // 制約が何も無い場合：unused×6 全候補（通常は稀）
+        if req.iter().all(|x| x.is_none()) {
             let mut out = Vec::new();
             for p in 0..self.pieces.len() {
                 if self.used[p] {
@@ -984,41 +1056,48 @@ impl UniquenessSolver {
                     out.push((p * 6 + r) as u16);
                 }
             }
-            out.sort_by_key(|&pl| {
-                let p = (pl as usize) / 6;
-                match self.pieces[p].kind {
-                    PieceKind::False => 0, // 偽を先に試す
-                    PieceKind::True => 1,
-                }
-            });
+            return out;
         }
 
-        // 制約リストを「候補が一番少ないインデックス」順に
-        let mut cons_sorted = cons;
-        cons_sorted.sort_by_key(|&(d, v)| self.idx.get(&(d, v)).map(|x| x.len()).unwrap_or(0));
+        // base constraint: postings が最小のものを選ぶ
+        let mut base_dir: usize = 0;
+        let mut base_post: &[u16] = &[];
+        let mut best_len: usize = usize::MAX;
+        for d in 0..6 {
+            if let Some(v) = req[d] {
+                let post = &self.idx[idx_key(d, v)];
+                let len = post.len();
+                if len == 0 {
+                    return vec![]; // 即死
+                }
+                if len < best_len {
+                    best_len = len;
+                    base_dir = d;
+                    base_post = post;
+                }
+            }
+        }
+        let _ = base_dir; // 将来デバッグ用
 
-        let (d0, v0) = cons_sorted[0];
-        let Some(base) = self.idx.get(&(d0, v0)) else {
-            return vec![];
-        };
-
+        // base_post を走査して他制約を満たすかチェック
         let mut out = Vec::new();
-        'cand: for &pl in base.iter() {
-            let pl_us = pl as usize;
-            let p = pl_us / 6;
-            let r = pl_us % 6;
+        'cand: for &pl in base_post.iter() {
+            let pu = pl as usize;
+            let p = pu / 6;
+            let r = pu % 6;
             if self.used[p] {
                 continue;
             }
-            // すべての制約を満たすかチェック
-            for &(d, v) in cons_sorted.iter().skip(1) {
-                if self.edges_rot[p][r][d as usize] != v {
-                    continue 'cand;
+
+            for d in 0..6 {
+                if let Some(v) = req[d] {
+                    if self.edges_rot[p][r][d] != v {
+                        continue 'cand;
+                    }
                 }
             }
             out.push(pl);
         }
-
         out
     }
 
@@ -1031,24 +1110,173 @@ impl UniquenessSolver {
             if self.assignment[cell].is_some() {
                 continue;
             }
+
             let cands = self.candidates_for_cell(cell);
             let cnt = cands.len();
             if cnt == 0 {
-                return Some((cell, cands)); // 即死（枝刈り）
+                return Some((cell, cands));
             }
             if cnt < best_count {
                 best_count = cnt;
                 best_cell = Some(cell);
                 best_cands = cands;
                 if best_count == 1 {
-                    // これ以上小さいのは0だけなので早期終了
-                    //（0は上で返っている）
+                    break;
+                }
+            }
+        }
+        best_cell.map(|c| (c, best_cands))
+    }
+
+    fn recompute_structural_candidates(&mut self, cell: usize) {
+        if !self.cand_cache.dirty[cell] {
+            return;
+        }
+        self.cand_cache.dirty[cell] = false;
+
+        // 既に埋まってるセルは参照されない想定だが、安全に空にする
+        if self.assignment[cell].is_some() {
+            self.cand_cache.unconstrained[cell] = false;
+            self.cand_cache.cands[cell].clear();
+            return;
+        }
+
+        // req[d] = 方向dに要求される値（Noneなら未拘束）
+        let mut req: [Option<i32>; 6] = [None, None, None, None, None, None];
+
+        for d in 0..6 {
+            if self.board.boundary[cell][d] {
+                req[d] = Some(0);
+            }
+        }
+        for d in 0..6 {
+            if let Some(nb) = self.board.neighbors[cell][d] {
+                if let Some((p2, r2)) = self.assignment[nb] {
+                    let v_nb = self.edges_rot[p2][r2][opposite_dir(d)];
+                    req[d] = Some(-v_nb);
+                }
+            }
+        }
+
+        // 制約なし
+        if req.iter().all(|x| x.is_none()) {
+            self.cand_cache.unconstrained[cell] = true;
+            self.cand_cache.cands[cell].clear();
+            return;
+        }
+        self.cand_cache.unconstrained[cell] = false;
+
+        // base postings（最短）を選ぶ
+        let mut base_post: &[u16] = &[];
+        let mut best_len = usize::MAX;
+
+        for d in 0..6 {
+            if let Some(v) = req[d] {
+                let post = &self.idx[idx_key(d, v)]; // postings配列の場合
+                if post.is_empty() {
+                    self.cand_cache.cands[cell].clear();
+                    return;
+                }
+                if post.len() < best_len {
+                    best_len = post.len();
+                    base_post = post;
+                }
+            }
+        }
+
+        // 交差チェック（usedは見ない）
+        let out = &mut self.cand_cache.cands[cell];
+        out.clear();
+
+        'cand: for &pl in base_post.iter() {
+            let pu = pl as usize;
+            let p = pu / 6;
+            let r = pu % 6;
+
+            for d in 0..6 {
+                if let Some(v) = req[d] {
+                    if self.edges_rot[p][r][d] != v {
+                        continue 'cand;
+                    }
+                }
+            }
+            out.push(pl);
+        }
+    }
+
+    fn pick_mrv_cell_cached(&mut self) -> Option<(usize, Vec<u16>)> {
+        let mut best_cell: Option<usize> = None;
+        let mut best_cnt: usize = usize::MAX;
+        let mut best_list: Vec<u16> = Vec::new();
+
+        // “制約なしセル”の候補数を速く出すために unused_pieces を数える
+        let mut unused_pieces = 0usize;
+        for p in 0..self.pieces.len() {
+            if !self.used[p] {
+                unused_pieces += 1;
+            }
+        }
+
+        for cell in 0..self.board.n_cells() {
+            if self.assignment[cell].is_some() {
+                continue;
+            }
+
+            self.recompute_structural_candidates(cell);
+
+            // 候補を数える（usedはここで反映）
+            let cnt;
+            if self.cand_cache.unconstrained[cell] {
+                cnt = unused_pieces * 6;
+                if cnt == 0 {
+                    return Some((cell, Vec::new()));
+                }
+                // MRV比較用にリストは作らない（bestになったら作る）
+            } else {
+                let mut c = 0usize;
+                for &pl in self.cand_cache.cands[cell].iter() {
+                    let p = (pl as usize) / 6;
+                    if !self.used[p] {
+                        c += 1;
+                    }
+                }
+                cnt = c;
+                if cnt == 0 {
+                    return Some((cell, Vec::new()));
+                }
+            }
+
+            if cnt < best_cnt {
+                best_cnt = cnt;
+                best_cell = Some(cell);
+
+                // best候補の具体的リストを作る（usedフィルタ込み）
+                best_list.clear();
+                if self.cand_cache.unconstrained[cell] {
+                    for p in 0..self.pieces.len() {
+                        if self.used[p] {
+                            continue;
+                        }
+                        for r in 0..6 {
+                            best_list.push((p * 6 + r) as u16);
+                        }
+                    }
+                } else {
+                    for &pl in self.cand_cache.cands[cell].iter() {
+                        let p = (pl as usize) / 6;
+                        if !self.used[p] {
+                            best_list.push(pl);
+                        }
+                    }
+                }
+
+                if best_cnt == 1 {
                     break;
                 }
             }
         }
 
-        best_cell.map(|c| (c, best_cands))
+        best_cell.map(|c| (c, best_list))
     }
 
     fn handle_solution(&mut self) {
@@ -1082,38 +1310,38 @@ impl UniquenessSolver {
         if self.nonunique {
             return;
         }
+
         if filled == self.board.n_cells() {
             self.handle_solution();
             return;
         }
 
-        let Some((cell, cands)) = self.pick_mrv_cell() else {
+        let Some((cell, cands)) = self.pick_mrv_cell_cached() else {
             return;
         };
         if cands.is_empty() {
             return;
         }
 
-        // 分岐：候補を試す
         for pl in cands {
             if self.nonunique {
                 return;
             }
             self.nodes += 1;
 
-            let pl_us = pl as usize;
-            let p = pl_us / 6;
-            let r = pl_us % 6;
+            let pu = pl as usize;
+            let p = pu / 6;
+            let r = pu % 6;
 
-            // 置く
             self.used[p] = true;
             self.assignment[cell] = Some((p, r));
+            self.mark_dirty_around(cell); // ★ここ
 
             self.dfs(filled + 1);
 
-            // 戻す
             self.assignment[cell] = None;
             self.used[p] = false;
+            self.mark_dirty_around(cell); // ★ここ（戻しでも制約が変わる）
         }
     }
 
@@ -1138,6 +1366,8 @@ fn check_unique_true(side_len: i32, true_pieces: &[Piece]) -> UniqueReport {
 pub struct ExistenceReport {
     pub exists: bool,
     pub nodes: u64,
+    /// exists=true のとき、反例の配置（cell -> (piece_index, rot)）
+    pub witness_assignment: Option<Vec<Option<(usize, usize)>>>,
 }
 
 /// 「偽を1枚以上使う完全敷き詰め解」が存在するかをチェック
@@ -1158,7 +1388,7 @@ struct ExistenceSolver {
     board: Board,
     pieces: Vec<Piece>,
     edges_rot: Vec<[[i32; 6]; 6]>,
-    idx: HashMap<(u8, i32), Vec<u16>>,
+    idx: Postings,
 
     used: Vec<bool>,
     assignment: Vec<Option<(usize, usize)>>,
@@ -1166,6 +1396,8 @@ struct ExistenceSolver {
     require_at_least_one_false: bool,
     found: bool,
     nodes: u64,
+    witness_assignment: Option<Vec<Option<(usize, usize)>>>,
+    cand_cache: CandidateCache,
 }
 
 impl ExistenceSolver {
@@ -1181,18 +1413,7 @@ impl ExistenceSolver {
             }
         }
 
-        // (dir,value) -> placements
-        let mut idx: HashMap<(u8, i32), Vec<u16>> = HashMap::new();
-        for p in 0..n_p {
-            for r in 0..6 {
-                let pl = (p * 6 + r) as u16;
-                for d in 0..6 {
-                    idx.entry((d as u8, edges_rot[p][r][d]))
-                        .or_default()
-                        .push(pl);
-                }
-            }
-        }
+        let idx = build_postings(&edges_rot);
 
         Self {
             board,
@@ -1204,6 +1425,18 @@ impl ExistenceSolver {
             require_at_least_one_false,
             found: false,
             nodes: 0,
+            witness_assignment: None,
+            cand_cache: CandidateCache::new(Board::new(side_len).n_cells()),
+        }
+    }
+
+    #[inline]
+    fn mark_dirty_around(&mut self, cell: usize) {
+        self.cand_cache.mark_dirty(cell);
+        for d in 0..6 {
+            if let Some(nb) = self.board.neighbors[cell][d] {
+                self.cand_cache.mark_dirty(nb);
+            }
         }
     }
 
@@ -1230,87 +1463,267 @@ impl ExistenceSolver {
         cons
     }
 
+    fn recompute_structural_candidates(&mut self, cell: usize) {
+        if !self.cand_cache.dirty[cell] {
+            return;
+        }
+        self.cand_cache.dirty[cell] = false;
+
+        // 既に埋まってるセルは参照されない想定だが、安全に空にする
+        if self.assignment[cell].is_some() {
+            self.cand_cache.unconstrained[cell] = false;
+            self.cand_cache.cands[cell].clear();
+            return;
+        }
+
+        // req[d] = 方向dに要求される値（Noneなら未拘束）
+        let mut req: [Option<i32>; 6] = [None, None, None, None, None, None];
+
+        for d in 0..6 {
+            if self.board.boundary[cell][d] {
+                req[d] = Some(0);
+            }
+        }
+        for d in 0..6 {
+            if let Some(nb) = self.board.neighbors[cell][d] {
+                if let Some((p2, r2)) = self.assignment[nb] {
+                    let v_nb = self.edges_rot[p2][r2][opposite_dir(d)];
+                    req[d] = Some(-v_nb);
+                }
+            }
+        }
+
+        // 制約なし
+        if req.iter().all(|x| x.is_none()) {
+            self.cand_cache.unconstrained[cell] = true;
+            self.cand_cache.cands[cell].clear();
+            return;
+        }
+        self.cand_cache.unconstrained[cell] = false;
+
+        // base postings（最短）を選ぶ
+        let mut base_post: &[u16] = &[];
+        let mut best_len = usize::MAX;
+
+        for d in 0..6 {
+            if let Some(v) = req[d] {
+                let post = &self.idx[idx_key(d, v)]; // postings配列の場合
+                if post.is_empty() {
+                    self.cand_cache.cands[cell].clear();
+                    return;
+                }
+                if post.len() < best_len {
+                    best_len = post.len();
+                    base_post = post;
+                }
+            }
+        }
+
+        // 交差チェック（usedは見ない）
+        let out = &mut self.cand_cache.cands[cell];
+        out.clear();
+
+        'cand: for &pl in base_post.iter() {
+            let pu = pl as usize;
+            let p = pu / 6;
+            let r = pu % 6;
+
+            for d in 0..6 {
+                if let Some(v) = req[d] {
+                    if self.edges_rot[p][r][d] != v {
+                        continue 'cand;
+                    }
+                }
+            }
+            out.push(pl);
+        }
+    }
+
     fn candidates_for_cell(&self, cell: usize) -> Vec<u16> {
-        let mut cons = self.constraints_for_cell(cell);
-        if cons.is_empty() {
-            // no constraints: all unused placements
-            let mut out = Vec::new();
+        let mut req: [Option<i32>; 6] = [None, None, None, None, None, None];
+
+        for d in 0..6 {
+            if self.board.boundary[cell][d] {
+                req[d] = Some(0);
+            }
+        }
+        for d in 0..6 {
+            if let Some(nb) = self.board.neighbors[cell][d] {
+                if let Some((p2, r2)) = self.assignment[nb] {
+                    let v_nb = self.edges_rot[p2][r2][opposite_dir(d)];
+                    req[d] = Some(-v_nb);
+                }
+            }
+        }
+
+        if req.iter().all(|x| x.is_none()) {
+            // ここは稀だが、偽優先で返す（存在する個体を早く落とす）
+            let mut out_false = Vec::new();
+            let mut out_true = Vec::new();
             for p in 0..self.pieces.len() {
                 if self.used[p] {
                     continue;
                 }
                 for r in 0..6 {
-                    out.push((p * 6 + r) as u16);
+                    let pl = (p * 6 + r) as u16;
+                    match self.pieces[p].kind {
+                        PieceKind::False => out_false.push(pl),
+                        PieceKind::True => out_true.push(pl),
+                    }
                 }
             }
-            return out;
+            out_false.extend(out_true);
+            return out_false;
         }
 
-        // sort constraints by smallest posting list
-        cons.sort_by_key(|&(d, v)| self.idx.get(&(d, v)).map(|x| x.len()).unwrap_or(0));
+        // base constraint = shortest postings
+        let mut base_post: &[u16] = &[];
+        let mut best_len: usize = usize::MAX;
+        for d in 0..6 {
+            if let Some(v) = req[d] {
+                let post = &self.idx[idx_key(d, v)];
+                let len = post.len();
+                if len == 0 {
+                    return vec![];
+                }
+                if len < best_len {
+                    best_len = len;
+                    base_post = post;
+                }
+            }
+        }
 
-        let (d0, v0) = cons[0];
-        let Some(base) = self.idx.get(&(d0, v0)) else {
-            return vec![];
-        };
+        let mut out_false = Vec::new();
+        let mut out_true = Vec::new();
 
-        let mut out = Vec::new();
-        'cand: for &pl in base.iter() {
+        'cand: for &pl in base_post.iter() {
             let pu = pl as usize;
             let p = pu / 6;
             let r = pu % 6;
             if self.used[p] {
                 continue;
             }
-            for &(d, v) in cons.iter().skip(1) {
-                if self.edges_rot[p][r][d as usize] != v {
-                    continue 'cand;
+
+            for d in 0..6 {
+                if let Some(v) = req[d] {
+                    if self.edges_rot[p][r][d] != v {
+                        continue 'cand;
+                    }
                 }
             }
-            out.push(pl);
+
+            match self.pieces[p].kind {
+                PieceKind::False => out_false.push(pl),
+                PieceKind::True => out_true.push(pl),
+            }
         }
-        out
+
+        // 偽候補を先に返す（存在する個体を早く落とす）
+        out_false.extend(out_true);
+        out_false
     }
 
-    fn pick_mrv_cell(&self) -> Option<(usize, Vec<u16>)> {
+    fn pick_mrv_cell_cached(&mut self) -> Option<(usize, Vec<u16>)> {
         let mut best_cell: Option<usize> = None;
-        let mut best_cands: Vec<u16> = Vec::new();
-        let mut best_cnt = usize::MAX;
+        let mut best_cnt: usize = usize::MAX;
+        let mut best_list: Vec<u16> = Vec::new();
+
+        let mut unused_pieces = 0usize;
+        for p in 0..self.pieces.len() {
+            if !self.used[p] {
+                unused_pieces += 1;
+            }
+        }
 
         for cell in 0..self.board.n_cells() {
             if self.assignment[cell].is_some() {
                 continue;
             }
-            let cands = self.candidates_for_cell(cell);
-            let cnt = cands.len();
-            if cnt == 0 {
-                return Some((cell, cands)); // dead end
+
+            self.recompute_structural_candidates(cell);
+
+            let cnt;
+            if self.cand_cache.unconstrained[cell] {
+                cnt = unused_pieces * 6;
+                if cnt == 0 {
+                    return Some((cell, Vec::new()));
+                }
+            } else {
+                let mut c = 0usize;
+                for &pl in self.cand_cache.cands[cell].iter() {
+                    let p = (pl as usize) / 6;
+                    if !self.used[p] {
+                        c += 1;
+                    }
+                }
+                cnt = c;
+                if cnt == 0 {
+                    return Some((cell, Vec::new()));
+                }
             }
+
             if cnt < best_cnt {
                 best_cnt = cnt;
                 best_cell = Some(cell);
-                best_cands = cands;
+
+                // best候補の具体的リスト（偽→真の順）
+                best_list.clear();
+
+                let mut tmp_false: Vec<u16> = Vec::new();
+                let mut tmp_true: Vec<u16> = Vec::new();
+
+                if self.cand_cache.unconstrained[cell] {
+                    for p in 0..self.pieces.len() {
+                        if self.used[p] {
+                            continue;
+                        }
+                        for r in 0..6 {
+                            let pl = (p * 6 + r) as u16;
+                            match self.pieces[p].kind {
+                                PieceKind::False => tmp_false.push(pl),
+                                PieceKind::True => tmp_true.push(pl),
+                            }
+                        }
+                    }
+                } else {
+                    for &pl in self.cand_cache.cands[cell].iter() {
+                        let p = (pl as usize) / 6;
+                        if self.used[p] {
+                            continue;
+                        }
+                        match self.pieces[p].kind {
+                            PieceKind::False => tmp_false.push(pl),
+                            PieceKind::True => tmp_true.push(pl),
+                        }
+                    }
+                }
+
+                best_list.extend(tmp_false);
+                best_list.extend(tmp_true);
+
                 if best_cnt == 1 {
                     break;
                 }
             }
         }
 
-        best_cell.map(|c| (c, best_cands))
+        best_cell.map(|c| (c, best_list))
     }
 
     fn dfs(&mut self, filled: usize, used_false: bool) {
         if self.found {
             return;
         }
+
         if filled == self.board.n_cells() {
             if !self.require_at_least_one_false || used_false {
                 self.found = true;
+                self.witness_assignment = Some(self.assignment.clone());
             }
             return;
         }
 
-        let Some((cell, cands)) = self.pick_mrv_cell() else {
+        let Some((cell, cands)) = self.pick_mrv_cell_cached() else {
             return;
         };
         if cands.is_empty() {
@@ -1327,16 +1740,16 @@ impl ExistenceSolver {
             let p = pu / 6;
             let r = pu % 6;
 
-            // place
             self.used[p] = true;
             self.assignment[cell] = Some((p, r));
+            self.mark_dirty_around(cell); // ★
 
             let used_false2 = used_false || matches!(self.pieces[p].kind, PieceKind::False);
             self.dfs(filled + 1, used_false2);
 
-            // undo
             self.assignment[cell] = None;
             self.used[p] = false;
+            self.mark_dirty_around(cell); // ★
         }
     }
 
@@ -1351,7 +1764,7 @@ impl ExistenceSolver {
             return;
         }
 
-        let Some((cell, cands)) = self.pick_mrv_cell() else {
+        let Some((cell, cands)) = self.pick_mrv_cell_cached() else {
             return;
         };
         if cands.is_empty() {
@@ -1438,16 +1851,18 @@ impl ExistenceSolver {
     }
 
     fn run(&mut self) -> ExistenceReport {
-        // 2段階：偽アンカー → 通常探索
+        // まず偽アンカー探索で「偽混入解がある個体」を速攻で落とす
         if self.require_at_least_one_false {
-            self.try_false_anchor_first(12); // まず12セルだけ（調整可）
+            self.try_false_anchor_first(12);
         }
+        // 見つからなければ通常探索
         if !self.found {
-            self.dfs_from_state(0, false);
+            self.dfs(0, false);
         }
         ExistenceReport {
             exists: self.found,
             nodes: self.nodes,
+            witness_assignment: self.witness_assignment.clone(),
         }
     }
 }
@@ -2211,25 +2626,37 @@ pub fn build_piece_svg_if_valid(edges: [i32; 6]) -> Option<String> {
 }
 
 use std::fs;
-
-fn dump_svgs(pieces: &[Piece]) {
-    fs::create_dir_all("out_svg").unwrap();
+use std::io;
+fn dump_svgs(
+    dir: &str,
+    pieces: &[Piece],
+    filter_piece_ids: Option<&HashSet<usize>>,
+) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
 
     for p in pieces {
+        if let Some(f) = filter_piece_ids {
+            if !f.contains(&p.id) {
+                continue;
+            }
+        }
+
         if let Some(svg) = build_piece_svg_if_valid(p.edges) {
             let path = format!(
-                "out_svg/piece_{:04}_{}.svg",
+                "{}/piece_{:04}_{}.svg",
+                dir,
                 p.id,
                 match p.kind {
                     PieceKind::True => "T",
                     PieceKind::False => "F",
                 }
             );
-            fs::write(path, svg).unwrap();
+            fs::write(path, svg)?;
         } else {
             eprintln!("SKIP invalid geometry piece_id={}", p.id);
         }
     }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -2308,4 +2735,93 @@ fn piece_risk_score(edges: &[i32; 6], meta: &[EdgeMeta]) -> f64 {
 
     // 重みは好みで調整（凹と高さを強めに）
     concave * 5.0 + sum_h * 3.0 + nonzero * 0.5
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WitnessPlacement {
+    q: i32,
+    r: i32,
+    piece_id: usize,
+    rot: usize,
+}
+
+//////////////// for testing
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WitnessSolution {
+    placements: Vec<WitnessPlacement>,
+}
+
+fn witness_to_solution_json(
+    side_len: i32,
+    pieces: &[Piece],
+    witness: &[Option<(usize, usize)>],
+) -> WitnessSolution {
+    let board = Board::new(side_len);
+    let mut placements = Vec::with_capacity(board.n_cells());
+
+    for (cell_idx, a) in witness.iter().enumerate() {
+        let (pidx, rot) = a.expect("witness must be full assignment");
+        let c = board.coords[cell_idx];
+        placements.push(WitnessPlacement {
+            q: c.q,
+            r: c.r,
+            piece_id: pieces[pidx].id, // 注意: pidx は pieces 配列のインデックス
+            rot,
+        });
+    }
+
+    WitnessSolution { placements }
+}
+
+fn on_false_tiling_found(
+    seed: u64,
+    side_len: i32,
+    pieces: &[Piece],
+    rep_f: &ExistenceReport,
+) -> Result<()> {
+    let Some(w) = &rep_f.witness_assignment else {
+        return Ok(());
+    };
+
+    // 反例に使われた piece_id を収集（pieces[pidx].id の方）
+    let mut used_ids: HashSet<usize> = HashSet::new();
+    for a in w.iter() {
+        let (pidx, _rot) = a.expect("full witness");
+        used_ids.insert(pieces[pidx].id);
+    }
+
+    let dir = format!("out_svg/bad_seed_{}", seed);
+    dump_svgs(&dir, pieces, Some(&used_ids))?;
+
+    let witness_json = witness_to_solution_json(side_len, pieces, w);
+    std::fs::write(
+        format!("{}/bad_witness.json", dir),
+        serde_json::to_string_pretty(&witness_json)?,
+    )?;
+
+    Ok(())
+}
+/////////////// till here
+
+#[derive(Clone)]
+struct CandidateCache {
+    dirty: Vec<bool>,
+    unconstrained: Vec<bool>, // trueなら「構造制約なし」(候補は unused全×6)
+    cands: Vec<Vec<u16>>,     // 構造候補（usedは未フィルタ）
+}
+
+impl CandidateCache {
+    fn new(n_cells: usize) -> Self {
+        Self {
+            dirty: vec![true; n_cells],
+            unconstrained: vec![false; n_cells],
+            cands: vec![Vec::new(); n_cells],
+        }
+    }
+
+    #[inline]
+    fn mark_dirty(&mut self, cell: usize) {
+        self.dirty[cell] = true;
+    }
 }
