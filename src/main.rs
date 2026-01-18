@@ -395,7 +395,7 @@ fn compute_stats(true_pieces: &[Piece], all_pieces: &[Piece]) -> Stats {
 fn generate_puzzle(cfg: &Config) -> Result<Puzzle> {
     let mut rng = StdRng::seed_from_u64(cfg.seed);
 
-    let (mut true_pieces, true_edge_ids_abs, mut stats) = generate_true_pieces(
+    let (mut true_pieces, true_edge_ids_abs, _true_stats) = generate_true_pieces(
         &mut rng,
         cfg.side_len,
         cfg.edge_alphabet,
@@ -414,7 +414,7 @@ fn generate_puzzle(cfg: &Config) -> Result<Puzzle> {
     );
 
     // Update stats including false
-    stats = compute_stats(&true_pieces, &false_pieces);
+    let stats = compute_stats(&true_pieces, &false_pieces);
 
     let mut pieces = Vec::new();
     pieces.append(&mut true_pieces);
