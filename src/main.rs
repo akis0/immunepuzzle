@@ -101,7 +101,7 @@ fn main() -> Result<()> {
             min_gap: cli.min_gap,
             chiral: cli.chiral,
             back_id: cli.back_id,
-            max_retries: 100000,
+            max_retries: 200000,
         };
 
         let puzzle = generate_puzzle(&board, &cfg, &mut memo, seed)?;
