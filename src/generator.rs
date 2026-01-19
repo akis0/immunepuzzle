@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use rand::prelude::IndexedRandom;
-use rand::{seq::SliceRandom, Rng};
+use rand::rngs::StdRng;
+use rand::{seq::SliceRandom, Rng, SeedableRng};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
@@ -49,35 +50,42 @@ pub struct GeneratorConfig {
 pub fn generate_puzzle(
     board: &Board,
     cfg: &GeneratorConfig,
-    rng: &mut impl Rng,
     memo: &mut GeomMemo,
     seed: u64,
 ) -> Result<GeneratedPuzzle> {
     let mut retries = 0;
-    let (true_pieces, solution, used_ids) = loop {
-        let attempt = assign_true_pieces(board, cfg, rng, memo);
+    let mut attempt_seed = seed;
+    loop {
+        let mut rng = StdRng::seed_from_u64(attempt_seed);
+        let attempt: Result<GeneratedPuzzle> = (|| {
+            let (true_pieces, solution, used_ids) = assign_true_pieces(board, cfg, &mut rng, memo)?;
+            let mut pieces = true_pieces;
+            let start_id = pieces.len();
+            let decoys = generate_decoy_clusters(board, cfg, &mut rng, memo, &used_ids, start_id)?;
+            pieces.extend(decoys);
+            Ok(GeneratedPuzzle {
+                pieces,
+                solution,
+                seed: attempt_seed,
+                retries,
+            })
+        })();
+
         match attempt {
-            Ok(ok) => break ok,
-            Err(_) => {
+            Ok(puzzle) => return Ok(puzzle),
+            Err(err) => {
                 retries += 1;
                 if retries >= cfg.max_retries {
-                    bail!("failed to generate valid true pieces after {} retries", retries);
+                    bail!(
+                        "failed to generate puzzle after {} retries: {}",
+                        retries,
+                        err
+                    );
                 }
+                attempt_seed = seed.wrapping_add(retries as u64);
             }
         }
-    };
-
-    let mut pieces = true_pieces;
-    let start_id = pieces.len();
-    let decoys = generate_decoy_clusters(board, cfg, rng, memo, &used_ids, start_id)?;
-    pieces.extend(decoys);
-
-    Ok(GeneratedPuzzle {
-        pieces,
-        solution,
-        seed,
-        retries,
-    })
+    }
 }
 
 fn assign_true_pieces(
@@ -147,9 +155,8 @@ fn assign_true_pieces(
     }
 
     if cfg.chiral {
-        let mut available: Vec<i32> = ((cfg.core_alphabet + anchor_target as i32 + 1)
-            ..=cfg.total_alphabet)
-            .collect();
+        let mut available: Vec<i32> =
+            ((cfg.core_alphabet + anchor_target as i32 + 1)..=cfg.total_alphabet).collect();
         if !available.is_empty() {
             available.shuffle(rng);
             let mut internal_edges = adjacency_edges(board);
@@ -178,7 +185,11 @@ fn assign_true_pieces(
             edges: rotated,
             is_true: true,
             cluster_id: None,
-            back_id: if cfg.back_id { Some(rng.random()) } else { None },
+            back_id: if cfg.back_id {
+                Some(rng.random())
+            } else {
+                None
+            },
         });
         solution.push(SolutionEntry {
             q: cell.q,
@@ -212,13 +223,7 @@ fn generate_decoy_clusters(
             let mut success = false;
             for _ in 0..cfg.max_retries {
                 let cells = random_cluster(*size, rng);
-                let cluster = assign_decoy_cluster(
-                    &cells,
-                    cfg,
-                    rng,
-                    &true_ids,
-                    &unused_ids,
-                );
+                let cluster = assign_decoy_cluster(&cells, cfg, rng, &true_ids, &unused_ids);
 
                 let mut temp_id = next_piece_id;
                 let mut cluster_pieces = Vec::new();
@@ -235,7 +240,11 @@ fn generate_decoy_clusters(
                         edges: rotated,
                         is_true: false,
                         cluster_id: Some(cluster_id),
-                        back_id: if cfg.back_id { Some(rng.random()) } else { None },
+                        back_id: if cfg.back_id {
+                            Some(rng.random())
+                        } else {
+                            None
+                        },
                     });
                     temp_id += 1;
                 }

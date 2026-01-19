@@ -107,9 +107,7 @@ pub fn build_piece_geom_if_valid(
 ) -> Option<PieceGeom> {
     let (canon, rot) = canonical_shape(edges);
     if let Some(cached) = memo.cache.get(&canon) {
-        return cached
-            .as_ref()
-            .map(|geom| rotate_geom(geom, (6 - rot) % 6));
+        return cached.as_ref().map(|geom| rotate_geom(geom, (6 - rot) % 6));
     }
 
     let (geom, concave_segments, concave_ids) = build_piece_geom_raw(&canon);
@@ -142,9 +140,7 @@ pub fn build_piece_geom_if_valid(
     Some(rotate_geom(&geom, (6 - rot) % 6))
 }
 
-fn build_piece_geom_raw(
-    edges: &[i32; 6],
-) -> (PieceGeom, Vec<Vec<(Point, Point)>>, Vec<i32>) {
+fn build_piece_geom_raw(edges: &[i32; 6]) -> (PieceGeom, Vec<Vec<(Point, Point)>>, Vec<i32>) {
     let verts = base_hex();
     let mut points = Vec::new();
     let mut concave_segments: Vec<Vec<(Point, Point)>> = Vec::new();
@@ -274,12 +270,7 @@ fn edge_shape_from_id(id: i32) -> Option<EdgeShape> {
         let h0 = 0.2 + 0.1 * (h0_index as f64);
         let h1 = 0.2 + 0.1 * (h1_index as f64);
         return Some(EdgeShape {
-            kind: ShapeKind::Trapezoid {
-                t0,
-                length,
-                h0,
-                h1,
-            },
+            kind: ShapeKind::Trapezoid { t0, length, h0, h1 },
         });
     }
 

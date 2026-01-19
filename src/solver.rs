@@ -129,11 +129,7 @@ impl<'a> Solver<'a> {
         self.mark_dirty(state, cell);
     }
 
-    fn compute_structural_candidates(
-        &self,
-        cell: usize,
-        assigned: &[Option<usize>],
-    ) -> Vec<usize> {
+    fn compute_structural_candidates(&self, cell: usize, assigned: &[Option<usize>]) -> Vec<usize> {
         let mut req: [Option<i32>; 6] = [None, None, None, None, None, None];
         for dir in 0..6 {
             if self.board.boundary[cell][dir] {

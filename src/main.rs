@@ -1,5 +1,4 @@
 use anyhow::{bail, Result};
-use rand::{rngs::StdRng, SeedableRng};
 use serde::Serialize;
 use serde_json::json;
 use std::env;
@@ -92,7 +91,6 @@ fn main() -> Result<()> {
         } else {
             rand::random()
         };
-        let mut rng = StdRng::seed_from_u64(seed);
         let cfg = GeneratorConfig {
             total_alphabet: cli.total_alphabet,
             core_alphabet: cli.core_alphabet,
@@ -103,12 +101,17 @@ fn main() -> Result<()> {
             min_gap: cli.min_gap,
             chiral: cli.chiral,
             back_id: cli.back_id,
-            max_retries: 64,
+            max_retries: 100000,
         };
 
-        let puzzle = generate_puzzle(&board, &cfg, &mut rng, &mut memo, seed)?;
+        let puzzle = generate_puzzle(&board, &cfg, &mut memo, seed)?;
 
-        let true_pieces: Vec<Piece> = puzzle.pieces.iter().cloned().filter(|p| p.is_true).collect();
+        let true_pieces: Vec<Piece> = puzzle
+            .pieces
+            .iter()
+            .cloned()
+            .filter(|p| p.is_true)
+            .collect();
         let u_res = uniqueness_solver(&board, &true_pieces, cli.total_alphabet, cli.max_u);
         let f_res = existence_solver(&board, &puzzle.pieces, cli.total_alphabet, cli.max_f);
         let score = f_res.nodes + u_res.nodes / 4;
@@ -135,7 +138,7 @@ fn main() -> Result<()> {
         eprintln!(
             "trial {} seed={} score={} u_nodes={} f_nodes={} aborted={} valid={}",
             trial + 1,
-            seed,
+            candidate.puzzle.seed,
             score,
             candidate.u_res.nodes,
             candidate.f_res.nodes,
@@ -190,18 +193,32 @@ fn main() -> Result<()> {
     println!("{}", json);
 
     if cli.dump_svg && selected.valid {
-        dump_svgs(&cli.svg_dir, &selected.puzzle.pieces, &cli.svg_filter, cli.min_gap, &mut memo)?;
+        dump_svgs(
+            &cli.svg_dir,
+            &selected.puzzle.pieces,
+            &cli.svg_filter,
+            cli.min_gap,
+            &mut memo,
+        )?;
     }
 
     Ok(())
 }
 
-fn pick_better(current: Option<Candidate>, next: &Candidate, prefer_valid: bool) -> Option<Candidate> {
+fn pick_better(
+    current: Option<Candidate>,
+    next: &Candidate,
+    prefer_valid: bool,
+) -> Option<Candidate> {
     match current {
         None => Some(next.clone()),
         Some(best) => {
             if prefer_valid && best.valid != next.valid {
-                return if next.valid { Some(next.clone()) } else { Some(best) };
+                return if next.valid {
+                    Some(next.clone())
+                } else {
+                    Some(best)
+                };
             }
             if next.score > best.score {
                 Some(next.clone())
@@ -280,11 +297,11 @@ fn parse_args() -> Result<Cli> {
     let mut side = 8;
     let mut total_alphabet = 295;
     let mut core_alphabet = 15;
-    let mut anchor_ratio = 1.0;
-    let mut false_flat = 0.05;
+    let mut anchor_ratio = 0.2;
+    let mut false_flat = 0.1;
     let mut false_attach = 0.2;
     let mut false_clusters = parse_clusters("1x10,2x8,4x4")?;
-    let mut trials = 1;
+    let mut trials = 1000;
     let mut seed = None;
     let mut max_u = 200_000;
     let mut max_f = 300_000;
