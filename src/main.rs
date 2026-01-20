@@ -12,11 +12,11 @@ use std::path::{Path, PathBuf};
 
 const DIRS: [(i32, i32); 6] = [
     (1, 0),
-    (1, -1),
-    (0, -1),
-    (-1, 0),
-    (-1, 1),
     (0, 1),
+    (-1, 1),
+    (-1, 0),
+    (0, -1),
+    (1, -1),
 ];
 
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
@@ -32,9 +32,60 @@ struct Shape {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Point {
+struct Pt {
     x: f64,
     y: f64,
+}
+
+impl Pt {
+    fn add(self, o: Pt) -> Pt {
+        Pt {
+            x: self.x + o.x,
+            y: self.y + o.y,
+        }
+    }
+
+    fn sub(self, o: Pt) -> Pt {
+        Pt {
+            x: self.x - o.x,
+            y: self.y - o.y,
+        }
+    }
+
+    fn mul(self, k: f64) -> Pt {
+        Pt {
+            x: self.x * k,
+            y: self.y * k,
+        }
+    }
+
+    fn dot(self, o: Pt) -> f64 {
+        self.x * o.x + self.y * o.y
+    }
+
+    fn norm(self) -> f64 {
+        self.dot(self).sqrt()
+    }
+}
+
+fn unit(v: Pt) -> Pt {
+    let len = v.norm();
+    if len == 0.0 {
+        Pt { x: 0.0, y: 0.0 }
+    } else {
+        v.mul(1.0 / len)
+    }
+}
+
+#[allow(dead_code)]
+fn lerp(a: Pt, b: Pt, t: f64) -> Pt {
+    a.add(b.sub(a).mul(t))
+}
+
+#[derive(Clone, Copy, Debug)]
+struct EdgeProfile {
+    q: [f64; 3],
+    p: [f64; 3],
 }
 
 #[derive(Clone, Debug)]
@@ -133,6 +184,7 @@ struct Config {
     max_u_nodes: u64,
     max_f_nodes: u64,
     dump_svgs: bool,
+    dump_edge_test: bool,
     rot_equiv: bool,
     kill_reflection: bool,
     false_count: Option<usize>,
@@ -210,6 +262,9 @@ fn main() -> Result<()> {
     if cfg.dump_svgs {
         dump_svgs(&candidate.svg_context, cfg.svg_dir.as_deref())?;
     }
+    if cfg.dump_edge_test {
+        dump_edge_test(&candidate.svg_context, cfg.svg_dir.as_deref())?;
+    }
 
     Ok(())
 }
@@ -244,6 +299,7 @@ impl Config {
             max_u_nodes: 30_000,
             max_f_nodes: 30_000,
             dump_svgs: false,
+            dump_edge_test: false,
             rot_equiv: false,
             kill_reflection: false,
             false_count: None,
@@ -312,6 +368,9 @@ impl Config {
                 }
                 "--dump-svgs" => {
                     cfg.dump_svgs = true;
+                }
+                "--dump-edge-test" => {
+                    cfg.dump_edge_test = true;
                 }
                 "--svg-dir" => {
                     let v = args.next().context("missing value for --svg-dir")?;
@@ -388,6 +447,7 @@ fn print_help() {
          --max-u-nodes <n>\n\
          --max-f-nodes <n>\n\
          --dump-svgs\n\
+         --dump-edge-test\n\
          --svg-dir <path>\n\
          --rot-equiv\n\
          --kill-reflection\n\
@@ -779,59 +839,42 @@ fn spanning_tree_edges(neighbors: &[ [Option<usize>; 6] ], rng: &mut StdRng) -> 
 
 fn random_shape(rng: &mut StdRng) -> Shape {
     loop {
-        let q1 = rng.random_range(1..=7);
-        let q2 = rng.random_range(q1 + 1..=8);
-        let q3 = rng.random_range(q2 + 1..=9);
-        let p1 = random_depth_for_q(rng, q1);
-        let p2 = random_depth_for_q(rng, q2);
-        let p3 = random_depth_for_q(rng, q3);
-
-        if p1 == 0 && q1 != 1 && q1 != 9 {
-            continue;
-        }
-        if p2 == 0 && q2 != 1 && q2 != 9 {
-            continue;
-        }
-        if p3 == 0 && q3 != 1 && q3 != 9 {
-            continue;
-        }
-        if p1 == p2 && p2 == p3 {
-            continue;
-        }
+        let pos1 = rng.random_range(1..=7);
+        let pos2 = rng.random_range(pos1 + 1..=8);
+        let pos3 = rng.random_range(pos2 + 1..=9);
+        let depth1 = random_depth_for_pos(rng, pos1);
+        let depth2 = random_depth_for_pos(rng, pos2);
+        let depth3 = random_depth_for_pos(rng, pos3);
 
         // Avoid completely flat shape.
-        if p1 == 0 && p2 == 0 && p3 == 0 {
+        if depth1 == 0 && depth2 == 0 && depth3 == 0 {
             continue;
         }
 
         return Shape {
-            q: [q1, q2, q3],
-            p: [p1, p2, p3],
+            q: [depth1, depth2, depth3],
+            p: [pos1, pos2, pos3],
         };
     }
 }
 
-fn random_depth_for_q(rng: &mut StdRng, q_tenths: u8) -> u8 {
-    let max_p = max_depth_tenths(q_tenths);
-    let min_p = if q_tenths == 1 || q_tenths == 9 { 0 } else { 1 };
-    if max_p < min_p {
-        return min_p;
-    }
-    rng.random_range(min_p..=max_p)
+fn random_depth_for_pos(rng: &mut StdRng, pos_tenths: u8) -> u8 {
+    let max_depth = max_depth_tenths(pos_tenths);
+    rng.random_range(0..=max_depth)
 }
 
-fn max_depth_tenths(q_tenths: u8) -> u8 {
-    let min_q = q_tenths.min(10 - q_tenths);
-    ((16 * min_q) / 10) as u8
+fn max_depth_tenths(pos_tenths: u8) -> u8 {
+    let min_tenths = pos_tenths.saturating_sub(1).min(9 - pos_tenths);
+    ((16 * min_tenths) / 10) as u8
 }
 
 fn shape_key(shape: &Shape) -> Vec<(u8, u8)> {
     let mut key = Vec::new();
     for idx in 0..3 {
-        if shape.p[idx] == 0 {
+        if shape.q[idx] == 0 {
             continue;
         }
-        key.push((shape.q[idx], shape.p[idx]));
+        key.push((shape.p[idx], shape.q[idx]));
     }
     if key.is_empty() {
         key.push((0, 0));
@@ -841,8 +884,8 @@ fn shape_key(shape: &Shape) -> Vec<(u8, u8)> {
 
 fn is_mirror_symmetric(shape: &Shape) -> bool {
     let mirrored = Shape {
-        q: [10 - shape.q[2], 10 - shape.q[1], 10 - shape.q[0]],
-        p: [shape.p[2], shape.p[1], shape.p[0]],
+        q: [shape.q[2], shape.q[1], shape.q[0]],
+        p: [10 - shape.p[2], 10 - shape.p[1], 10 - shape.p[0]],
     };
     shape_key(shape) == shape_key(&mirrored)
 }
@@ -993,12 +1036,12 @@ fn random_false_poison_id(rng: &mut StdRng, true_alphabet: i32, total_alphabet: 
     }
 }
 
-fn axial_to_point(ax: Axial, size: f64) -> Point {
+fn axial_to_point(ax: Axial, size: f64) -> Pt {
     let q = ax.q as f64;
     let r = ax.r as f64;
-    let x = size * (3.0 / 2.0 * q);
-    let y = size * ((3f64).sqrt() / 2.0 * q + (3f64).sqrt() * r);
-    Point { x, y }
+    let x = size * (3f64).sqrt() * (q + r / 2.0);
+    let y = size * (3.0 / 2.0 * r);
+    Pt { x, y }
 }
 
 fn max_edge_id(pieces: &[Piece]) -> i32 {
@@ -1019,7 +1062,7 @@ impl GeometryCache {
             return *value;
         }
         let polygon = piece_polygon(edges, shapes, 1.0);
-        let ok = !polygon_self_intersects(&polygon);
+        let ok = !poly_self_intersects(&polygon);
         self.cache.insert(key, ok);
         ok
     }
@@ -1045,63 +1088,132 @@ fn rotate_edges(edges: &[i32; 6], rot: usize) -> [i32; 6] {
     out
 }
 
-fn piece_polygon(edges: &[i32; 6], shapes: &[Shape], size: f64) -> Vec<Point> {
-    let verts = hex_vertices(size);
-    let mut points = Vec::new();
-    points.push(verts[0]);
-    for i in 0..6 {
-        let a = verts[i];
-        let b = verts[(i + 1) % 6];
-        let edge = edges[i];
-        if edge == 0 {
-            points.push(b);
-            continue;
+fn shape_to_profile(shape: &Shape) -> EdgeProfile {
+    EdgeProfile {
+        q: [
+            shape.p[0] as f64 / 10.0,
+            shape.p[1] as f64 / 10.0,
+            shape.p[2] as f64 / 10.0,
+        ],
+        p: [
+            shape.q[0] as f64 / 10.0,
+            shape.q[1] as f64 / 10.0,
+            shape.q[2] as f64 / 10.0,
+        ],
+    }
+}
+
+fn oriented_profile_for_edge(a: Pt, b: Pt, prof: EdgeProfile) -> Vec<(f64, f64)> {
+    let canonical = if a.x < b.x {
+        true
+    } else if a.x > b.x {
+        false
+    } else {
+        a.y <= b.y
+    };
+    let mut points = vec![
+        (0.0, 0.0),
+        (prof.q[0], 0.0),
+        (prof.q[0], prof.p[0]),
+        (prof.q[1], prof.p[1]),
+        (prof.q[2], prof.p[2]),
+        (prof.q[2], 0.0),
+        (1.0, 0.0),
+    ];
+    if !canonical {
+        for (t, _) in points.iter_mut() {
+            *t = 1.0 - *t;
         }
-        let shape = &shapes[edge.abs() as usize];
-        let mut edge_vec = Point {
-            x: b.x - a.x,
-            y: b.y - a.y,
-        };
-        let len = (edge_vec.x * edge_vec.x + edge_vec.y * edge_vec.y).sqrt();
-        if len == 0.0 {
-            points.push(b);
-            continue;
-        }
-        edge_vec.x /= len;
-        edge_vec.y /= len;
-        let normal = Point {
-            x: edge_vec.y,
-            y: -edge_vec.x,
-        };
-        for idx in 0..3 {
-            let q = shape.q[idx] as f64 / 10.0;
-            let mut p = shape.p[idx] as f64 / 10.0;
-            if edge < 0 {
-                p = -p;
+        points.reverse();
+    }
+    let mut compact: Vec<(f64, f64)> = Vec::new();
+    for (t, p) in points {
+        if let Some((last_t, last_p)) = compact.last_mut() {
+            if (t - *last_t).abs() < 1e-9 {
+                if p.abs() < last_p.abs() {
+                    *last_p = p;
+                }
+                continue;
             }
-            let px = a.x + (b.x - a.x) * q + normal.x * p * len;
-            let py = a.y + (b.y - a.y) * q + normal.y * p * len;
-            points.push(Point { x: px, y: py });
         }
-        points.push(b);
+        compact.push((t, p));
+    }
+    compact
+}
+
+fn edge_polyline_points(a: Pt, b: Pt, sign: i32, prof: EdgeProfile) -> Vec<Pt> {
+    let u = unit(b.sub(a));
+    let n_out = Pt { x: u.y, y: -u.x };
+    let n = if sign >= 0 { n_out } else { n_out.mul(-1.0) };
+    let ab = b.sub(a);
+    let profile_points = oriented_profile_for_edge(a, b, prof);
+    let mut points = Vec::with_capacity(profile_points.len());
+    for (t, p) in profile_points {
+        let point = a.add(ab.mul(t)).add(n.mul(p));
+        points.push(point);
     }
     points
 }
 
-fn hex_vertices(size: f64) -> [Point; 6] {
-    let mut verts = [Point { x: 0.0, y: 0.0 }; 6];
+fn base_hex_vertices() -> [Pt; 6] {
+    let mut verts = [Pt { x: 0.0, y: 0.0 }; 6];
     for i in 0..6 {
-        let angle = (60.0 * i as f64 - 30.0) * PI / 180.0;
-        verts[i] = Point {
-            x: size * angle.cos(),
-            y: size * angle.sin(),
+        let angle = i as f64 * PI / 3.0 - PI / 6.0;
+        verts[i] = Pt {
+            x: angle.cos(),
+            y: angle.sin(),
         };
     }
     verts
 }
 
-#[allow(dead_code)]
-fn polygon_self_intersects(poly: &[Point]) -> bool {
+fn build_hex_outline_from_edge_ids(
+    verts: [Pt; 6],
+    edge_ids: [i32; 6],
+    mut decode: impl FnMut(i32) -> Option<EdgeProfile>,
+) -> Option<Vec<Pt>> {
+    let mut outline = Vec::new();
+    outline.push(verts[0]);
+    for i in 0..6 {
+        let a = verts[i];
+        let b = verts[(i + 1) % 6];
+        let edge_id = edge_ids[i];
+        if edge_id == 0 {
+            outline.push(b);
+            continue;
+        }
+        let profile = decode(edge_id.abs())?;
+        let sign = if edge_id >= 0 { 1 } else { -1 };
+        let points = edge_polyline_points(a, b, sign, profile);
+        for point in points.iter().skip(1) {
+            outline.push(*point);
+        }
+    }
+    if outline.len() > 1 {
+        let last = outline[outline.len() - 1];
+        if same_point(outline[0], last) {
+            outline.pop();
+        }
+    }
+    if poly_self_intersects(&outline) {
+        None
+    } else {
+        Some(outline)
+    }
+}
+
+fn piece_polygon(edges: &[i32; 6], shapes: &[Shape], size: f64) -> Vec<Pt> {
+    let mut verts = base_hex_vertices();
+    for v in &mut verts {
+        *v = v.mul(size);
+    }
+    build_hex_outline_from_edge_ids(verts, *edges, |id| {
+        shapes.get(id as usize).map(shape_to_profile)
+    })
+    .unwrap_or_else(|| verts.to_vec())
+}
+
+fn poly_self_intersects(poly: &[Pt]) -> bool {
     if poly.len() < 4 {
         return false;
     }
@@ -1123,8 +1235,7 @@ fn polygon_self_intersects(poly: &[Point]) -> bool {
     false
 }
 
-#[allow(dead_code)]
-fn segments_intersect(a1: Point, a2: Point, b1: Point, b2: Point) -> bool {
+fn segments_intersect(a1: Pt, a2: Pt, b1: Pt, b2: Pt) -> bool {
     let o1 = orient(a1, a2, b1);
     let o2 = orient(a1, a2, b2);
     let o3 = orient(b1, b2, a1);
@@ -1146,8 +1257,7 @@ fn segments_intersect(a1: Point, a2: Point, b1: Point, b2: Point) -> bool {
     (o1 > 0.0) != (o2 > 0.0) && (o3 > 0.0) != (o4 > 0.0)
 }
 
-#[allow(dead_code)]
-fn orient(a: Point, b: Point, c: Point) -> f64 {
+fn orient(a: Pt, b: Pt, c: Pt) -> f64 {
     let val = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
     if val.abs() < 1e-9 {
         0.0
@@ -1156,13 +1266,43 @@ fn orient(a: Point, b: Point, c: Point) -> f64 {
     }
 }
 
-#[allow(dead_code)]
-fn on_segment(a: Point, b: Point, c: Point) -> bool {
+fn on_segment(a: Pt, b: Pt, c: Pt) -> bool {
     let min_x = a.x.min(b.x) - 1e-9;
     let max_x = a.x.max(b.x) + 1e-9;
     let min_y = a.y.min(b.y) - 1e-9;
     let max_y = a.y.max(b.y) + 1e-9;
     c.x >= min_x && c.x <= max_x && c.y >= min_y && c.y <= max_y
+}
+
+fn same_point(a: Pt, b: Pt) -> bool {
+    (a.x - b.x).abs() < 1e-9 && (a.y - b.y).abs() < 1e-9
+}
+
+#[allow(dead_code)]
+fn polygon_to_svg(poly: &[Pt], scale: f64, margin: f64) -> String {
+    let mut min_x = f64::MAX;
+    let mut min_y = f64::MAX;
+    let mut max_x = f64::MIN;
+    let mut max_y = f64::MIN;
+    for p in poly {
+        min_x = min_x.min(p.x);
+        min_y = min_y.min(p.y);
+        max_x = max_x.max(p.x);
+        max_y = max_y.max(p.y);
+    }
+    let width = (max_x - min_x) * scale + margin * 2.0;
+    let height = (max_y - min_y) * scale + margin * 2.0;
+    let view_min_x = min_x * scale - margin;
+    let view_min_y = min_y * scale - margin;
+    let points = poly
+        .iter()
+        .map(|p| format!("{},{}", p.x * scale, p.y * scale))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="{} {} {} {}"><polygon points="{}" fill="#ffcc66" stroke="#222" stroke-width="0.04" /></svg>"##,
+        view_min_x, view_min_y, width, height, points
+    )
 }
 
 struct SolveResult {
@@ -1443,13 +1583,13 @@ fn dump_svgs(context: &SvgContext, base_dir: Option<&Path>) -> Result<()> {
         let poly = piece_polygon(&piece.edges, &context.shapes, 1.0);
         let col = (idx % grid_cols) as f64;
         let row = (idx / grid_cols) as f64;
-        let offset = Point {
+        let offset = Pt {
             x: col * spacing,
             y: row * spacing,
         };
         let shifted = poly
             .iter()
-            .map(|p| Point {
+            .map(|p| Pt {
                 x: p.x + offset.x,
                 y: p.y + offset.y,
             })
@@ -1461,6 +1601,7 @@ fn dump_svgs(context: &SvgContext, base_dir: Option<&Path>) -> Result<()> {
     let board_svg = dir.join("solution.svg");
     let mut board_file = fs::File::create(&board_svg)?;
     let mut board_polys = Vec::new();
+    let board_spacing = 1.08;
     for placement in &context.placements {
         let piece = &context.pieces[placement.piece_id];
         let poly = piece_polygon(&rotate_edges(&piece.edges, placement.rot as usize), &context.shapes, 1.0);
@@ -1469,11 +1610,11 @@ fn dump_svgs(context: &SvgContext, base_dir: Option<&Path>) -> Result<()> {
                 q: placement.q,
                 r: placement.r,
             },
-            1.2,
+            board_spacing,
         );
         let rotated = poly
             .iter()
-            .map(|p| Point {
+            .map(|p| Pt {
                 x: p.x + center.x,
                 y: p.y + center.y,
             })
@@ -1485,7 +1626,63 @@ fn dump_svgs(context: &SvgContext, base_dir: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-fn write_svg(file: &mut fs::File, polys: &[(Vec<Point>, PieceKind)]) -> Result<()> {
+fn dump_edge_test(context: &SvgContext, base_dir: Option<&Path>) -> Result<()> {
+    let dir = if let Some(base) = base_dir {
+        base.join(format!("seed_{}", context.seed))
+    } else {
+        PathBuf::from(format!("svgs/seed_{}", context.seed))
+    };
+    fs::create_dir_all(&dir)?;
+
+    let edge_id = 1i32;
+    if context.shapes.len() <= edge_id as usize {
+        bail!("edge test requires at least one shape");
+    }
+
+    let verts = base_hex_vertices();
+    let mut edges_a = [0i32; 6];
+    let mut edges_b = [0i32; 6];
+    edges_a[0] = edge_id;
+    edges_b[3] = -edge_id;
+
+    let Some(poly_a) = build_hex_outline_from_edge_ids(verts, edges_a, |id| {
+        context.shapes.get(id as usize).map(shape_to_profile)
+    }) else {
+        bail!("edge test polygon A invalid");
+    };
+    let Some(poly_b) = build_hex_outline_from_edge_ids(verts, edges_b, |id| {
+        context.shapes.get(id as usize).map(shape_to_profile)
+    }) else {
+        bail!("edge test polygon B invalid");
+    };
+
+    let a = verts[0];
+    let b = verts[1];
+    let u = unit(b.sub(a));
+    let n_out = Pt { x: u.y, y: -u.x };
+    let dist = (3f64).sqrt();
+    let offset_b = n_out.mul(dist);
+
+    let shifted_a = poly_a;
+    let shifted_b = poly_b
+        .iter()
+        .map(|p| p.add(offset_b))
+        .collect::<Vec<_>>();
+
+    let edge_svg = dir.join("edge_test.svg");
+    let mut edge_file = fs::File::create(&edge_svg)?;
+    write_svg(
+        &mut edge_file,
+        &[
+            (shifted_a, PieceKind::True),
+            (shifted_b, PieceKind::False),
+        ],
+    )?;
+
+    Ok(())
+}
+
+fn write_svg(file: &mut fs::File, polys: &[(Vec<Pt>, PieceKind)]) -> Result<()> {
     let mut min_x = f64::MAX;
     let mut min_y = f64::MAX;
     let mut max_x = f64::MIN;
@@ -1509,12 +1706,12 @@ fn write_svg(file: &mut fs::File, polys: &[(Vec<Point>, PieceKind)]) -> Result<(
         width,
         height
     )?;
-        for (poly, kind) in polys {
-            let color = match kind {
-                PieceKind::True => "#ffcc66",
-                PieceKind::False => "#66aaff",
-            };
-            let points = poly
+    for (poly, kind) in polys {
+        let color = match kind {
+            PieceKind::True => "#ffcc66",
+            PieceKind::False => "#66aaff",
+        };
+        let points = poly
             .iter()
             .map(|p| format!("{},{}", p.x, p.y))
             .collect::<Vec<_>>()
