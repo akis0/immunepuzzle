@@ -294,7 +294,7 @@ impl Config {
             true_alphabet: 240,
             core_alphabet: 40,
             anchor_ratio: 0.05,
-            false_flat: 0.2,
+            false_flat: 0.05,
             false_attach: 0.3,
             max_u_nodes: 30_000,
             max_f_nodes: 30_000,
