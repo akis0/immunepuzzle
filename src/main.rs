@@ -1,6 +1,6 @@
-use anyhow::{bail, Context, Result};
-use rand::rngs::StdRng;
+use anyhow::{Context, Result, bail};
 use rand::prelude::IndexedRandom;
+use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use serde::Serialize;
@@ -10,14 +10,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-const DIRS: [(i32, i32); 6] = [
-    (1, 0),
-    (0, 1),
-    (-1, 1),
-    (-1, 0),
-    (0, -1),
-    (1, -1),
-];
+const DIRS: [(i32, i32); 6] = [(1, 0), (0, 1), (-1, 1), (-1, 0), (0, -1), (1, -1)];
 
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
 struct Axial {
@@ -580,14 +573,7 @@ fn generate_candidate(
     let false_anchor = false_anchor_exists(&neighbors, &pieces, true_alphabet);
     let f_result = if false_anchor {
         let max_all_id = max_edge_id(&pieces).max(1);
-        let f_solver = Solver::new(
-            &neighbors,
-            &pieces,
-            max_all_id,
-            cfg.max_f_nodes,
-            1,
-            true,
-        );
+        let f_solver = Solver::new(&neighbors, &pieces, max_all_id, cfg.max_f_nodes, 1, true);
         f_solver.solve()
     } else {
         SolveResult {
@@ -713,7 +699,7 @@ fn build_neighbors(cells: &[Axial]) -> Vec<[Option<usize>; 6]> {
 
 fn build_true_pieces(
     n: usize,
-    neighbors: &[ [Option<usize>; 6] ],
+    neighbors: &[[Option<usize>; 6]],
     rng: &mut StdRng,
     core_alphabet: i32,
     true_alphabet: i32,
@@ -801,7 +787,7 @@ fn build_true_pieces(
     (pieces, unique_ids_used, entropy)
 }
 
-fn enumerate_edges(neighbors: &[ [Option<usize>; 6] ]) -> Vec<(usize, usize, usize)> {
+fn enumerate_edges(neighbors: &[[Option<usize>; 6]]) -> Vec<(usize, usize, usize)> {
     let mut edges = Vec::new();
     for (idx, dirs) in neighbors.iter().enumerate() {
         for (dir, neighbor) in dirs.iter().enumerate() {
@@ -815,7 +801,10 @@ fn enumerate_edges(neighbors: &[ [Option<usize>; 6] ]) -> Vec<(usize, usize, usi
     edges
 }
 
-fn spanning_tree_edges(neighbors: &[ [Option<usize>; 6] ], rng: &mut StdRng) -> HashSet<(usize, usize)> {
+fn spanning_tree_edges(
+    neighbors: &[[Option<usize>; 6]],
+    rng: &mut StdRng,
+) -> HashSet<(usize, usize)> {
     let mut visited = vec![false; neighbors.len()];
     let mut stack = vec![0usize];
     visited[0] = true;
@@ -1259,11 +1248,7 @@ fn segments_intersect(a1: Pt, a2: Pt, b1: Pt, b2: Pt) -> bool {
 
 fn orient(a: Pt, b: Pt, c: Pt) -> f64 {
     let val = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
-    if val.abs() < 1e-9 {
-        0.0
-    } else {
-        val
-    }
+    if val.abs() < 1e-9 { 0.0 } else { val }
 }
 
 fn on_segment(a: Pt, b: Pt, c: Pt) -> bool {
@@ -1312,7 +1297,7 @@ struct SolveResult {
 
 impl Solver {
     fn new(
-        neighbors: &[ [Option<usize>; 6] ],
+        neighbors: &[[Option<usize>; 6]],
         pieces: &[Piece],
         alphabet_max: i32,
         node_cap: u64,
@@ -1439,8 +1424,7 @@ impl Solver {
     fn candidates_for_cell(&mut self, idx: usize) -> Vec<PlacementRef> {
         let key = self.cell_key(idx);
         if self.cache[idx].key == key {
-            return self
-                .cache[idx]
+            return self.cache[idx]
                 .candidates
                 .iter()
                 .copied()
@@ -1518,7 +1502,7 @@ impl Solver {
 }
 
 fn false_anchor_exists(
-    neighbors: &[ [Option<usize>; 6] ],
+    neighbors: &[[Option<usize>; 6]],
     pieces: &[Piece],
     true_alphabet: i32,
 ) -> bool {
@@ -1604,7 +1588,11 @@ fn dump_svgs(context: &SvgContext, base_dir: Option<&Path>) -> Result<()> {
     let board_spacing = 1.08;
     for placement in &context.placements {
         let piece = &context.pieces[placement.piece_id];
-        let poly = piece_polygon(&rotate_edges(&piece.edges, placement.rot as usize), &context.shapes, 1.0);
+        let poly = piece_polygon(
+            &rotate_edges(&piece.edges, placement.rot as usize),
+            &context.shapes,
+            1.0,
+        );
         let center = axial_to_point(
             Axial {
                 q: placement.q,
@@ -1664,19 +1652,13 @@ fn dump_edge_test(context: &SvgContext, base_dir: Option<&Path>) -> Result<()> {
     let offset_b = n_out.mul(dist);
 
     let shifted_a = poly_a;
-    let shifted_b = poly_b
-        .iter()
-        .map(|p| p.add(offset_b))
-        .collect::<Vec<_>>();
+    let shifted_b = poly_b.iter().map(|p| p.add(offset_b)).collect::<Vec<_>>();
 
     let edge_svg = dir.join("edge_test.svg");
     let mut edge_file = fs::File::create(&edge_svg)?;
     write_svg(
         &mut edge_file,
-        &[
-            (shifted_a, PieceKind::True),
-            (shifted_b, PieceKind::False),
-        ],
+        &[(shifted_a, PieceKind::True), (shifted_b, PieceKind::False)],
     )?;
 
     Ok(())
